@@ -22,7 +22,7 @@ LDAP_USER            = os.environ['LDAP_USER']
 
 
 def get_all_slack_users():
-  url = '%s/scim/v1/Users?count=1000' % SLACK_API_HOST
+  url = '%s/scim/v1/Users?count=999999' % SLACK_API_HOST
   http_response = requests.get(url=url, headers=HEADERS)
   http_response.raise_for_status()
   results = http_response.json()
@@ -131,5 +131,5 @@ if __name__ == '__main__':
       sync_slack_ldap()
     except:
       logger.exception('Error syncing users.')
-    logger.info('Sleeping for 10 minute')
-    time.sleep(600)
+    logger.info('Sleeping for 60 minutes')
+    time.sleep(3600)
