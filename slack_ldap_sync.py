@@ -8,17 +8,23 @@ import time
 
 logger = logging.getLogger('slack_ldap_sync')
 
-SLACK_TOKEN          = os.environ['SLACK_TOKEN']
-SLACK_SCIM_TOKEN     = 'Bearer %s' % SLACK_TOKEN
-SLACK_API_HOST       = 'https://api.slack.com'
-SLACK_SUBDOMAIN      = os.environ['SLACK_SUBDOMAIN']  # eg. https://foobar.slack.com
-HEADERS              = {'content-type': 'application/json', 'Authorization': SLACK_SCIM_TOKEN}
-LDAP_HOST            = os.environ['LDAP_HOST']
-LDAP_PEOPLE_OU       = os.environ['LDAP_PEOPLE_OU']
-LDAP_PASS            = os.environ['LDAP_PASS']
-LDAP_PORT            = '636'
-LDAP_URI             = 'ldaps://%s:%s' % (LDAP_HOST, LDAP_PORT)
-LDAP_USER            = os.environ['LDAP_USER']
+SLACK_TOKEN         = os.environ['SLACK_TOKEN']
+SLACK_SCIM_TOKEN    = 'Bearer %s' % SLACK_TOKEN
+SLACK_API_HOST      = 'https://api.slack.com'
+SLACK_SUBDOMAIN     = os.environ['SLACK_SUBDOMAIN']  # eg. https://foobar.slack.com
+HEADERS             = {'content-type': 'application/json', 'Authorization': SLACK_SCIM_TOKEN}
+LDAP_HOST           = os.environ['LDAP_HOST']
+LDAP_PEOPLE_OU      = os.environ['LDAP_PEOPLE_OU']
+LDAP_PASS           = os.environ['LDAP_PASS']
+LDAP_PORT           = '636'
+LDAP_URI            = 'ldaps://%s:%s' % (LDAP_HOST, LDAP_PORT)
+LDAP_USER           = os.environ['LDAP_USER']
+
+# configurable from 0 to 1
+# will raise exception if you try to delete more slack users than 20% of the total slack users.
+# This is in case ldap returns an empty list, or a truncated list.
+# We don't want LDAP issues to cause everyone in slack to be deleted.
+MAX_DELETE_FAILSAFE = 0.2
 
 
 def get_all_slack_users():
@@ -98,17 +104,15 @@ def disable_slack_user(slack_id, slack_email, reason, owners):
 
 def sync_slack_ldap():
   logger.info('Looking for slack users to delete that do not exist or are not active in LDAP')
-  guest_users = get_guest_users()
+  guest_users          = get_guest_users()
+  all_slack_owners     = get_owner_users()
+  all_slack_users      = get_all_slack_users()
+  all_ldap_users       = get_all_ldap_users()
+  deleting_slack_users = {}
 
-  all_slack_owners = get_owner_users()
-
-  all_slack_users = get_all_slack_users()
-
-  all_ldap_users = get_all_ldap_users()
-
+  # Collect all the users who should be deleted.
   for slack_user in all_slack_users:
     slack_user_email = slack_user['emails'][0]['value'].lower()
-
     # skip slack users that are already disabled ( active: False )
     if not slack_user['active']:
       continue
@@ -117,11 +121,20 @@ def sync_slack_ldap():
       continue
     # disable users who aren't in ldap
     if not all_ldap_users.get(slack_user_email):
-      disable_slack_user(slack_id=slack_user['id'], slack_email=slack_user_email, reason='they do not exist in LDAP.', owners=all_slack_owners)
+      deleting_slack_users[slack_user_email] = {'slack_id': slack_user['id'], 'reason': 'they do not exist in LDAP.'}
     # Since slack has infinite web/mobile session cookies, we will disable those sessions if the users ldap accounts is disabled
     if all_ldap_users[slack_user_email]['loginShell'][0] == '/bin/false':
-      disable_slack_user(slack_id=slack_user['id'], slack_email=slack_user_email, reason='their LDAP account has been disabled.', owners=all_slack_owners)
+      deleting_slack_users[slack_user_email] = {'slack_id': slack_user['id'], 'reason': 'their LDAP account has been disabled.'}
 
+  percent_slack_users_deleted = float(len(deleting_slack_users)) / len(all_slack_users)
+  print percent_slack_users_deleted
+  # raise exception if we try to delete too many users as a failsafe.
+  if percent_slack_users_deleted > MAX_DELETE_FAILSAFE:
+    logger.exception('The failsafe threshold for deleting too many slack users was reached. No users were deleted.')
+
+  # After the failsafe is over, go through and delete all the users who should be deleted.
+  for slack_email, value in deleting_slack_users.iteritems():
+    disable_slack_user(slack_id=value['slack_id'], slack_email=slack_email, reason=value['reason'], owners=all_slack_owners)
 
 if __name__ == '__main__':
   logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
