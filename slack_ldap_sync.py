@@ -108,7 +108,7 @@ def sync_slack_ldap():
   all_slack_owners     = get_owner_users()
   all_slack_users      = get_all_slack_users()
   all_ldap_users       = get_all_ldap_users()
-  deleting_slack_users = {}
+  slack_users_to_be_deleted = {}
 
   # Collect all the users who should be deleted.
   for slack_user in all_slack_users:
@@ -121,19 +121,19 @@ def sync_slack_ldap():
       continue
     # disable users who aren't in ldap
     if not all_ldap_users.get(slack_user_email):
-      deleting_slack_users[slack_user_email] = {'slack_id': slack_user['id'], 'reason': 'they do not exist in LDAP.'}
+      slack_users_to_be_deleted[slack_user_email] = {'slack_id': slack_user['id'], 'reason': 'they do not exist in LDAP.'}
     # Since slack has infinite web/mobile session cookies, we will disable those sessions if the users ldap accounts is disabled
     if all_ldap_users[slack_user_email]['loginShell'][0] == '/bin/false':
-      deleting_slack_users[slack_user_email] = {'slack_id': slack_user['id'], 'reason': 'their LDAP account has been disabled.'}
+      slack_users_to_be_deleted[slack_user_email] = {'slack_id': slack_user['id'], 'reason': 'their LDAP account has been disabled.'}
 
-  percent_slack_users_deleted = float(len(deleting_slack_users)) / len(all_slack_users)
+  percent_slack_users_deleted = float(len(slack_users_to_be_deleted)) / len(all_slack_users)
   print percent_slack_users_deleted
   # raise exception if we try to delete too many users as a failsafe.
   if percent_slack_users_deleted > MAX_DELETE_FAILSAFE:
     logger.exception('The failsafe threshold for deleting too many slack users was reached. No users were deleted.')
 
   # After the failsafe is over, go through and delete all the users who should be deleted.
-  for slack_email, value in deleting_slack_users.iteritems():
+  for slack_email, value in slack_users_to_be_deleted.iteritems():
     disable_slack_user(slack_id=value['slack_id'], slack_email=slack_email, reason=value['reason'], owners=all_slack_owners)
 
 if __name__ == '__main__':
