@@ -127,7 +127,6 @@ def sync_slack_ldap():
       slack_users_to_be_deleted[slack_user_email] = {'slack_id': slack_user['id'], 'reason': 'their LDAP account has been disabled.'}
 
   percent_slack_users_deleted = float(len(slack_users_to_be_deleted)) / len(all_slack_users)
-  print percent_slack_users_deleted
   # raise exception if we try to delete too many users as a failsafe.
   if percent_slack_users_deleted > MAX_DELETE_FAILSAFE:
     logger.exception('The failsafe threshold for deleting too many slack users was reached. No users were deleted.')
