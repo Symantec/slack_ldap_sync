@@ -1,0 +1,56 @@
+---
+  kind: "Template"
+  apiVersion: "v1"
+  metadata:
+    name: "slack-ldap-sync"
+  objects:
+    -
+      kind: "DeploymentConfig"
+      apiVersion: "v1"
+      metadata:
+        name: "slack-ldap-sync"
+        labels:
+          template: "slack-ldap-sync-template"
+      spec:
+        strategy:
+          type: "Recreate"
+        triggers:
+          -
+            type: "ConfigChange"
+        replicas: 1
+        selector:
+          name: "slack-ldap-sync"
+        template:
+          metadata:
+            labels:
+              name: "slack-ldap-sync"
+          spec:
+            containers:
+              -
+                command:
+                  - sh
+                  - -c
+                  - |
+                     . /root/source
+                     exec /src/slack_ldap_sync.py
+                name: "slack-ldap-sync-container"
+                image: "${image_url}"
+                volumeMounts:
+                 - name: secrets
+                   mountPath: /root
+                resources:
+                  requests:
+                    memory: "80Mi"
+                    cpu: "15m"
+                  limits:
+                    memory: "80Mi"
+                    cpu: "15m"
+            volumes:
+             -
+               name: secrets
+               secret:
+                 secretName: slack-ldap-secrets
+  parameters:
+    -
+      name: "image_url"
+      value: "{OPENSHIFT_URL}/slack_tools/slack_ldap_sync"

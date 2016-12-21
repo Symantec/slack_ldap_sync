@@ -1,0 +1,12 @@
+export SLACK_MAX_DELETE_FAILSAFE="0.2"
+export SLACK_TOKEN="xoxp-exampletokenfoobarbazqux"
+export SLACK_SUBDOMAIN="https://team.slack.com"
+export SLACK_ICON_EMOJI=":scream_cat:"
+export SLACK_SYNC_RUN_INTERVAL="1800"
+export AD_URL="ldaps://ldap.example.com:636"
+export AD_BASEDN="ou=people,DC=example,DC=com"
+export AD_SEARCH_FILTER_FOR_ACTIVE_EMPLOYEES_ONLY='(&(uid=*)(employee_status=active))'
+export AD_BINDDN="foo\user_name"
+export AD_BINDPW="password"
+export AD_SEARCHREQ_ATTRLIST='["mail", "active_employee_attribute=True"]'
+export AD_EMAIL_ATTRIBUTE="mail"

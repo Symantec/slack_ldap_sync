@@ -1,59 +1,92 @@
 #!/usr/bin/env python
 
-import ldap
+import json
 import logging
+import ldap
 import os
 import requests
 import time
+from ldap.controls.libldap import SimplePagedResultsControl
 
 logger = logging.getLogger('slack_ldap_sync')
 
-SLACK_TOKEN         = os.environ['SLACK_TOKEN']
-SLACK_SCIM_TOKEN    = 'Bearer %s' % SLACK_TOKEN
-SLACK_API_HOST      = 'https://api.slack.com'
-SLACK_SUBDOMAIN     = os.environ['SLACK_SUBDOMAIN']  # eg. https://foobar.slack.com
-HEADERS             = {'content-type': 'application/json', 'Authorization': SLACK_SCIM_TOKEN}
-LDAP_HOST           = os.environ['LDAP_HOST']
-LDAP_PEOPLE_OU      = os.environ['LDAP_PEOPLE_OU']
-LDAP_PASS           = os.environ['LDAP_PASS']
-LDAP_PORT           = '636'
-LDAP_URI            = 'ldaps://%s:%s' % (LDAP_HOST, LDAP_PORT)
-LDAP_USER           = os.environ['LDAP_USER']
-
-# configurable from 0 to 1
+# configurable as a float from 0 to 1
 # will raise exception if you try to delete more slack users than 20% of the total slack users.
 # This is in case ldap returns an empty list, or a truncated list.
 # We don't want LDAP issues to cause everyone in slack to be deleted.
-MAX_DELETE_FAILSAFE = 0.2
+max_delete_failsafe = float(os.environ.get('SLACK_MAX_DELETE_FAILSAFE', 0.2))
+slack_token         = os.environ.get('SLACK_TOKEN')
+slack_scim_token    = 'Bearer %s' % slack_token
+slack_api_host      = 'https://api.slack.com'
+slack_subdomain     = os.environ.get('SLACK_SUBDOMAIN')  # eg. https://foobar.slack.com
+slack_http_header   = {'content-type': 'application/json', 'Authorization': slack_scim_token}
+slack_icon_emoji    = os.environ.get('SLACK_ICON_EMOJI', ':scream_cat:')
+# 'ldaps://ad.example.com:636', make sure you always use ldaps
+ad_url              = os.environ.get('AD_URL')
+ad_basedn           = os.environ.get('AD_BASEDN')
+ad_binddn           = os.environ.get('AD_BINDDN')
+ad_bindpw           = os.environ.get('AD_BINDPW')
+ad_email_attribute  = os.environ.get('AD_EMAIL_ATTRIBUTE', 'mail')
+# note: make sure you only search the directory for active employees. This step is critical to the sync process.
+search_flt          = os.environ.get('AD_SEARCH_FILTER_FOR_ACTIVE_EMPLOYEES_ONLY')
+page_size           = 5000
+trace_level         = 0
+# '["uid", "active_employee_attribute"]'
+searchreq_attrlist  = json.loads(os.environ.get('AD_SEARCHREQ_ATTRLIST'))
+sync_run_interval   = float(os.environ.get('SLACK_SYNC_RUN_INTERVAL', '3600'))
 
 
 def get_all_slack_users():
-  url = '%s/scim/v1/Users?count=999999' % SLACK_API_HOST
-  http_response = requests.get(url=url, headers=HEADERS)
+  url = '%s/scim/v1/Users?count=999999' % slack_api_host
+  http_response = requests.get(url=url, headers=slack_http_header)
   http_response.raise_for_status()
   results = http_response.json()
   return results['Resources']
 
 
-def get_all_ldap_users():
-  ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_NEVER)
-  ldap_obj = ldap.initialize(LDAP_URI)
-  ldap_obj.protocol_version = ldap.VERSION3
-  ldap_obj.set_option(ldap.OPT_X_TLS,ldap.OPT_X_TLS_DEMAND)
-  ldap_obj.set_option(ldap.OPT_X_TLS_DEMAND, True)
-  ldap_obj.simple_bind_s(LDAP_USER, LDAP_PASS)
-  ldap_users = ldap_obj.search_s(LDAP_PEOPLE_OU, ldap.SCOPE_SUBTREE)
-  ldap_users_hashmap = {}
-  for ldap_user in ldap_users[1:]:
-    if not ldap_user[1].get('uid') or not ldap_user[1].get('mail'):
-      continue
-    ldap_users_hashmap[ldap_user[1]['mail'][0].lower()] = ldap_user[1]
-  return ldap_users_hashmap
+def get_all_active_ad_users():
+  l = ldap.initialize(ad_url, trace_level=trace_level)
+  l.set_option(ldap.OPT_REFERRALS, 0)
+  l.set_option(ldap.OPT_X_TLS_DEMAND, True)
+  l.protocol_version = 3
+  l.simple_bind_s(ad_binddn, ad_bindpw)
+
+  req_ctrl              = SimplePagedResultsControl(True,size=page_size,cookie='')
+  known_ldap_resp_ctrls = {SimplePagedResultsControl.controlType:SimplePagedResultsControl}
+  attrlist              = [s.encode('utf-8') for s in searchreq_attrlist]
+  msgid                 = l.search_ext(ad_basedn, ldap.SCOPE_SUBTREE, search_flt, attrlist=attrlist, serverctrls=[req_ctrl])
+  all_ad_users          = {}
+  pages                 = 0
+
+  while True:
+    pages += 1
+    rtype, rdata, rmsgid, serverctrls = l.result3(msgid,resp_ctrl_classes=known_ldap_resp_ctrls)
+    for entry in rdata:
+      if 'mail' in entry[1] and entry[1]['mail'][0]:
+        email = entry[1]['mail'][0]
+        all_ad_users[email.lower()] = True
+    pctrls = [
+      c
+      for c in serverctrls
+      if c.controlType == SimplePagedResultsControl.controlType
+    ]
+    if pctrls:
+      if pctrls[0].cookie:
+        # Copy cookie from response control to request control
+        req_ctrl.cookie = pctrls[0].cookie
+        msgid = l.search_ext(ad_basedn, ldap.SCOPE_SUBTREE, search_flt, attrlist=attrlist, serverctrls=[req_ctrl])
+      else:
+        break
+    else:
+      raise Exception("AD query Warning: Server ignores RFC 2696 control.")
+      break
+  l.unbind_s()
+  return all_ad_users
 
 
 def get_guest_users():
-  url = '%s/api/users.list' % SLACK_SUBDOMAIN
-  http_response = requests.get(url=url, params={'token': SLACK_TOKEN})
+  url = '%s/api/users.list' % slack_subdomain
+  http_response = requests.get(url=url, params={'token': slack_token})
   http_response.raise_for_status()
   users = http_response.json()['members']
   guest_users = {}
@@ -65,8 +98,8 @@ def get_guest_users():
 
 
 def get_owner_users():
-  url = '%s/api/users.list' % SLACK_SUBDOMAIN
-  http_response = requests.get(url=url, params={'token': SLACK_TOKEN})
+  url = '%s/api/users.list' % slack_subdomain
+  http_response = requests.get(url=url, params={'token': slack_token})
   http_response.raise_for_status()
   users = http_response.json()['members']
   owner_users = {}
@@ -76,16 +109,16 @@ def get_owner_users():
   return owner_users
 
 
-def slack_message_owners(message, slack_email, slack_id, reason, owners):
-  url = '%s/api/chat.postMessage' % SLACK_SUBDOMAIN
+def slack_message_owners(message, owners):
+  url = '%s/api/chat.postMessage' % slack_subdomain
   message = '```%s```' % message
   for owner in owners.keys():
     payload = {
-      'token'     : SLACK_TOKEN,
+      'token'     : slack_token,
       'channel'   : owner,
       'text'      : message,
       'username'  : 'slack reaper',
-      'icon_emoji': ':reaper:'
+      'icon_emoji': slack_icon_emoji
     }
     http_response = requests.get(url=url, params=payload)
     http_response.raise_for_status()
@@ -93,21 +126,21 @@ def slack_message_owners(message, slack_email, slack_id, reason, owners):
 
 
 def disable_slack_user(slack_id, slack_email, reason, owners):
-  url = '%s/scim/v1/Users/%s' % (SLACK_API_HOST, slack_id)
-  http_response = requests.delete(url, headers=HEADERS)
+  url = '%s/scim/v1/Users/%s' % (slack_api_host, slack_id)
+  http_response = requests.delete(url, headers=slack_http_header)
   http_response.raise_for_status()
   log_msg = 'slack_id: %s  email: %s  This user has had their sessions expired and is disabled because %s' % (slack_id, slack_email, reason)
   logger.info(log_msg)
-  slack_message_owners(message=log_msg, slack_email=slack_email, slack_id=slack_id, reason=reason, owners=owners)
+  slack_message_owners(message=log_msg, owners=owners)
   return True
 
 
 def sync_slack_ldap():
-  logger.info('Looking for slack users to delete that do not exist or are not active in LDAP')
-  guest_users          = get_guest_users()
-  all_slack_owners     = get_owner_users()
-  all_slack_users      = get_all_slack_users()
-  all_ldap_users       = get_all_ldap_users()
+  logger.info('Looking for slack users to delete that do not exist or are not active in corp LDAP')
+  guest_users               = get_guest_users()
+  all_slack_owners          = get_owner_users()
+  all_slack_users           = get_all_slack_users()
+  all_ad_users              = get_all_active_ad_users()
   slack_users_to_be_deleted = {}
 
   # Collect all the users who should be deleted.
@@ -119,29 +152,37 @@ def sync_slack_ldap():
     # skip guest / bot accounts
     if guest_users.get(slack_user['id']) or '@slack-bots.com' in slack_user_email:
       continue
-    # disable users who aren't in ldap
-    if not all_ldap_users.get(slack_user_email):
-      slack_users_to_be_deleted[slack_user_email] = {'slack_id': slack_user['id'], 'reason': 'they do not exist in LDAP.'}
-    # Since slack has infinite web/mobile session cookies, we will disable those sessions if the users ldap accounts is disabled
-    if all_ldap_users[slack_user_email]['loginShell'][0] == '/bin/false':
-      slack_users_to_be_deleted[slack_user_email] = {'slack_id': slack_user['id'], 'reason': 'their LDAP account has been disabled.'}
+    # Since slack has infinite web/mobile session cookies, we will disable those sessions if the users ldap account doesn't exist
+    if not all_ad_users.get(slack_user_email):
+      slack_users_to_be_deleted[slack_user_email] = {'slack_id': slack_user['id'], 'reason': 'they do not exist in corp LDAP.'}
 
   percent_slack_users_deleted = float(len(slack_users_to_be_deleted)) / len(all_slack_users)
   # raise exception if we try to delete too many users as a failsafe.
-  if percent_slack_users_deleted > MAX_DELETE_FAILSAFE:
-    logger.exception('The failsafe threshold for deleting too many slack users was reached. No users were deleted.')
+
+  if percent_slack_users_deleted > max_delete_failsafe:
+    raise Exception('The failsafe threshold for deleting too many slack users was reached. No users were deleted.')
 
   # After the failsafe is over, go through and delete all the users who should be deleted.
   for slack_email, value in slack_users_to_be_deleted.iteritems():
     disable_slack_user(slack_id=value['slack_id'], slack_email=slack_email, reason=value['reason'], owners=all_slack_owners)
 
+
 if __name__ == '__main__':
   logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
   logging.getLogger('requests').setLevel(logging.ERROR)
+  error_counter = 0
   while True:
     try:
       sync_slack_ldap()
-    except:
-      logger.exception('Error syncing users.')
-    logger.info('Sleeping for 60 minutes')
-    time.sleep(3600)
+      error_counter = 0
+    except Exception as error:
+      logger.exception(error)
+      # if we regularly have exceptions, let slack owners know about it once per day.
+      error_counter += 1
+      if error_counter % 48 == 4:
+        slack_error = 'This exception is being sent to slack since it is the 4th one is a row. %s' % error
+        owners = get_owner_users()
+        slack_message_owners(slack_error, owners)
+    sleep_message = 'Sleeping for %s minutes' % str(int(sync_run_interval) / 60)
+    logger.info(sleep_message)
+    time.sleep(sync_run_interval)
