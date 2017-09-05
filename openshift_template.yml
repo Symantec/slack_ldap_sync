@@ -53,4 +53,4 @@
   parameters:
     -
       name: "image_url"
-      value: "{OPENSHIFT_URL}/slack_tools/slack_ldap_sync"
+      value: "{DOCKER_REGISTRY_URL}/slack_tools/slack_ldap_sync"
