@@ -14,7 +14,7 @@ docker run -it -e SLACK_MAX_DELETE_FAILSAFE="0.2" \
 -e AD_BINDDN="foo\user_name" \
 -e AD_BINDPW="password" \
 -e AD_SEARCHREQ_ATTRLIST='["mail", "active_employee_attribute=True"]' \
--e AD_EMAIL_ATTRIBUTE="mail"
+-e AD_EMAIL_ATTRIBUTE="mail" slack_ldap_sync /src/slack_ldap_sync.py
 ```
 
 
