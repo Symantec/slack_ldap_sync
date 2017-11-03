@@ -36,7 +36,7 @@ searchreq_attrlist  = json.loads(os.environ.get('AD_SEARCHREQ_ATTRLIST'))
 sync_run_interval   = float(os.environ.get('SLACK_SYNC_RUN_INTERVAL', '3600'))
 
 
-def get_all_slack_users():
+def get_all_slack_scim_users():
   url = '%s/scim/v1/Users?count=999999' % slack_api_host
   http_response = requests.get(url=url, headers=slack_http_header)
   http_response.raise_for_status()
@@ -55,7 +55,7 @@ def get_all_active_ad_users():
   known_ldap_resp_ctrls = {SimplePagedResultsControl.controlType:SimplePagedResultsControl}
   attrlist              = [s.encode('utf-8') for s in searchreq_attrlist]
   msgid                 = l.search_ext(ad_basedn, ldap.SCOPE_SUBTREE, search_flt, attrlist=attrlist, serverctrls=[req_ctrl])
-  all_ad_users          = {}
+  all_active_ad_users   = {}
   pages                 = 0
 
   while True:
@@ -64,7 +64,7 @@ def get_all_active_ad_users():
     for entry in rdata:
       if 'mail' in entry[1] and entry[1]['mail'][0]:
         email = entry[1]['mail'][0]
-        all_ad_users[email.lower()] = True
+        all_active_ad_users[email.lower()] = True
     pctrls = [
       c
       for c in serverctrls
@@ -81,7 +81,7 @@ def get_all_active_ad_users():
       raise Exception("AD query Warning: Server ignores RFC 2696 control.")
       break
   l.unbind_s()
-  return all_ad_users
+  return all_active_ad_users
 
 
 def get_guest_users():
@@ -125,27 +125,48 @@ def slack_message_owners(message, owners):
   return True
 
 
+def enable_slack_user(slack_user, owners):
+  url = '%s/scim/v1/Users/%s' % (slack_api_host, slack_user['id'])
+  payload = {'id': slack_user['id'], 'active': True}
+  slack_user_email = get_primary_slack_email(slack_user['emails'])
+  response = requests.patch(url, data=json.dumps(payload), headers=slack_http_header)
+  response.raise_for_status()
+  log_msg = 'slack_id: %s email: %s has been brought back from the dead according to AD' % (slack_user['id'], slack_user_email)
+  logger.info(log_msg)
+  slack_message_owners(message=log_msg, owners=owners)
+  return True
+
+
 def disable_slack_user(slack_id, slack_email, reason, owners):
   url = '%s/scim/v1/Users/%s' % (slack_api_host, slack_id)
   http_response = requests.delete(url, headers=slack_http_header)
   http_response.raise_for_status()
-  log_msg = 'slack_id: %s  email: %s  This user has had their sessions expired and is disabled because %s' % (slack_id, slack_email, reason)
+  log_msg = 'slack_id: %s email: %s has had their session(s) expired and is disabled because %s' % (slack_id, slack_email, reason)
   logger.info(log_msg)
   slack_message_owners(message=log_msg, owners=owners)
   return True
+
+
+def get_primary_slack_email(emails):
+  for email in emails:
+    if email['primary']:
+      return email['value']
 
 
 def sync_slack_ldap():
   logger.info('Looking for slack users to delete that do not exist or are not active in corp LDAP')
   guest_users               = get_guest_users()
   all_slack_owners          = get_owner_users()
-  all_slack_users           = get_all_slack_users()
-  all_ad_users              = get_all_active_ad_users()
+  all_slack_scim_users      = get_all_slack_scim_users()
+  all_active_ad_users       = get_all_active_ad_users()
   slack_users_to_be_deleted = {}
 
   # Collect all the users who should be deleted.
-  for slack_user in all_slack_users:
-    slack_user_email = slack_user['emails'][0]['value'].lower()
+  for slack_user in all_slack_scim_users:
+    slack_user_email = get_primary_slack_email(slack_user['emails'])
+    # if a slack user is disabled, but they're active in AD, activate them in slack
+    if not slack_user['active'] and all_active_ad_users.get(slack_user_email):
+      enable_slack_user(slack_user, all_slack_owners)
     # skip slack users that are already disabled ( active: False )
     if not slack_user['active']:
       continue
@@ -153,10 +174,10 @@ def sync_slack_ldap():
     if guest_users.get(slack_user['id']) or '@slack-bots.com' in slack_user_email:
       continue
     # Since slack has infinite web/mobile session cookies, we will disable those sessions if the users ldap account doesn't exist
-    if not all_ad_users.get(slack_user_email):
+    if not all_active_ad_users.get(slack_user_email):
       slack_users_to_be_deleted[slack_user_email] = {'slack_id': slack_user['id'], 'reason': 'they do not exist in corp LDAP.'}
 
-  percent_slack_users_deleted = float(len(slack_users_to_be_deleted)) / len(all_slack_users)
+  percent_slack_users_deleted = float(len(slack_users_to_be_deleted)) / len(all_slack_scim_users)
   # raise exception if we try to delete too many users as a failsafe.
 
   if percent_slack_users_deleted > max_delete_failsafe:
