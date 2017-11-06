@@ -36,12 +36,25 @@ searchreq_attrlist  = json.loads(os.environ.get('AD_SEARCHREQ_ATTRLIST'))
 sync_run_interval   = float(os.environ.get('SLACK_SYNC_RUN_INTERVAL', '3600'))
 
 
-def get_all_slack_scim_users():
-  url = '%s/scim/v1/Users?count=999999' % slack_api_host
-  http_response = requests.get(url=url, headers=slack_http_header)
-  http_response.raise_for_status()
-  results = http_response.json()
-  return results['Resources']
+def get_all_slack_scim_users(count=500):
+
+  def get_page_of_scim_users(start_index, page_size):
+    url = '%s/scim/v1/Users?count=%s&startIndex=%s' % (slack_api_host, page_size, start_index)
+    http_response = requests.get(url=url, headers=slack_http_header)
+    http_response.raise_for_status()
+    return http_response.json()
+  current_index = 1
+  all_slack_users_qty = 2  # just to bootstrap the while loop.
+  all_slack_users = []
+  # use pagination, since we're about to get over 1k users. This should be supported anyway.
+  while current_index < all_slack_users_qty:
+    new_page_results = get_page_of_scim_users(start_index=current_index, page_size=count)
+    # on the first page get, set the total number of slack users from scim
+    if all_slack_users_qty == 2:
+      all_slack_users_qty = new_page_results['totalResults']
+    all_slack_users += new_page_results['Resources']
+    current_index += count
+  return all_slack_users
 
 
 def get_all_active_ad_users():
